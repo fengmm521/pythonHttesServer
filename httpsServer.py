@@ -17,16 +17,26 @@ import urllib
 import sys
 import shutil
 import mimetypes
+import json
+
+import hashlib
+
+import WXMsgTool
+
+
+wxtool = WXMsgTool.WXMsgTool()
 
 try:
     from cStringIO import StringIO
 except ImportError:
     from StringIO import StringIO
 
+nowPth = os.path.split(os.getcwd())[1]
 curdir = '.'
+
 class myHandler(BaseHTTPRequestHandler):
     def do_GET(self):  
-    	print self.path
+    	# print self.path
         if self.path=="/":  
             self.path="/index.html"  
   
@@ -51,12 +61,36 @@ class myHandler(BaseHTTPRequestHandler):
             if self.path.endswith(".swf"):  
                 mimetype='application/x-shockwave-flash'  
                 sendReply = True  
+            if self.path[0:3] == "/wx":
+                sendReply = False
+                datastrs = self.path.split('?')
+                if len(datastrs) > 1:
+                    requestr = datastrs[1]
+                    coms = requestr.split('&')
+                    reqdata = {}
+                    for c in coms:
+                        tmps = c.split('=')
+                        reqdata[tmps[0]] = tmps[1]
+                    # print reqdata
+                # sendstr = json.dumps(tokenback)
+                    if 'echostr' in reqdata.keys():
+                        sendstr = reqdata['echostr']
+                        length = len(sendstr)
+                        self.send_response(200)
+                        self.send_header("Content-type", 'application/json; encoding=utf-8')
+                        self.send_header("Content-Length", str(length))
+                        self.end_headers()
+                        self.wfile.write(sendstr)
+                    else:
+                        return reqdata
+
             if sendReply == True:  
                 #读取相应的静态资源文件，并发送它  
                 f = open(curdir + os.sep + self.path, 'rb')  
                 self.send_response(200)  
                 self.send_header('Content-type',mimetype)  
                 self.end_headers()  
+
                 self.wfile.write(f.read())  
                 f.close()  
             return  
@@ -64,28 +98,74 @@ class myHandler(BaseHTTPRequestHandler):
         except IOError:  
             self.send_error(404,'File Not Found: %s' % self.path)  
   
+    def sendEmptyMsg(self):
+        self.send_response(200)
+        self.send_header("Content-type", 'application/xml; encoding=utf-8')
+        self.send_header("Content-Length", str(''))
+        self.end_headers()
+        self.wfile.write('')
+
+    def sendMsg(self,toUserName,fromUserName,msg):
+        sendmsg = u'<xml><ToUserName><![CDATA[%s]]></ToUserName><FromUserName><![CDATA[%s]]></FromUserName><CreateTime>%d</CreateTime><MsgType><![CDATA[text]]></MsgType><Content><![CDATA['%(toUserName,fromUserName,int(time.time())) + unicode(msg,'utf-8') + u']]></Content></xml>'
+        sendmsg = sendmsg.encode('UTF-8')
+        self.send_response(200)
+        self.send_header("Content-type", 'application/xml; encoding=utf-8')
+        self.send_header("Content-Length", str(len(sendmsg)))
+        self.end_headers()
+        self.wfile.write(sendmsg)
+
+    #校验消息真实性
+    def verifyMsg(self,reqdict):
+        tokenver = []
+        tokenver.append('tokenxxx')
+        tokenver.append(reqdict['nonce'])
+        tokenver.append(reqdict['timestamp'])
+        tokenver.sort()
+        tmpstr = tokenver[0] + tokenver[1] + tokenver[2]
+        sha1str = hashlib.sha1(tmpstr).hexdigest()
+        if sha1str == reqdict['signature']:
+            return True
+        else:
+            return False
     def do_POST(self):
+
+
+        dictmp = self.do_GET()
+
+        isOK = False
+        if dictmp:
+            isOK = self.verifyMsg(dictmp)
+
+        if isOK:
+            length = self.headers.getheader('content-length');
+            nbytes = int(length)
+            data = self.rfile.read(nbytes)
+            wxtool.getWXMsg(data, self)
+        else:
+            self.send_error(404,'File Not Found: %s' % self.path)  
+
+
         """Serve a POST request."""
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={'REQUEST_METHOD': 'POST',
-                     'CONTENT_TYPE': self.headers['Content-Type'],
-                     })
-        filename = form['file'].filename
-        print filename
-        path = self.translate_path(self.path)
-        print path
-        filepath = os.path.join(path, filename)
-        print filepath
-        if os.path.exists(filepath):
-            self.log_error('File %s exist!', filename)
-            filepath += '.new'
+        # form = cgi.FieldStorage(
+        #     fp=self.rfile,
+        #     headers=self.headers,
+        #     environ={'REQUEST_METHOD': 'POST',
+        #              'CONTENT_TYPE': self.headers['Content-Type'],
+        #              })
+        # filename = form['file'].filename
+        # print filename
+        # path = self.translate_path(self.path)
+        # print path
+        # filepath = os.path.join(path, filename)
+        # print filepath
+        # if os.path.exists(filepath):
+        #     self.log_error('File %s exist!', filename)
+        #     filepath += '.new'
 
-        with open(filepath, 'wb') as f:
-            f.write(form['file'].value)
+        # with open(filepath, 'wb') as f:
+        #     f.write(form['file'].value)
 
-        self.do_GET()
+        
 
     def do_HEAD(self):
         """Serve a HEAD request."""
@@ -274,13 +354,35 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 serverAddr = ('127.0.0.1',4443)
 
-
-if __name__ == '__main__':
+def runHttpServer(ptemp):
     server = ThreadedHTTPServer(serverAddr, myHandler)
     print 'https server is running....'
     print 'Starting server, use <Ctrl-C> to stop'
+    
     server.socket = ssl.wrap_socket (server.socket, certfile='server.pem', server_side=True)
     server.serve_forever()
+def startServer(ltctool,btctool):
+
+    wxtool.setBTCTool(btctool)
+    wxtool.setLTCTool(ltctool)
+
+    thr = threading.Thread(target=runHttpServer,args=(None,))
+    thr.setDaemon(True)
+    thr.start()
+
+    return wxtool
+
+
+if __name__ == '__main__':
+    # server = ThreadedHTTPServer(serverAddr, myHandler)
+    # print 'https server is running....'
+    # print 'Starting server, use <Ctrl-C> to stop'
+    # server.socket = ssl.wrap_socket (server.socket, certfile='server.pem', server_side=True)
+    # server.serve_forever()
+    startServer()
+    while True:
+        pass
+        time.sleep(10)
 
 
 # # 生成rsa密钥
